@@ -1,5 +1,6 @@
 pub mod base;
 pub mod blas;
+pub mod bspline;
 pub mod cmp;
 pub mod multi;
 pub mod sparse;

@@ -1,3 +1,5 @@
+pub mod kan;
+
 pub use acyclib::{
     device::tensor::Shape,
     graph::{

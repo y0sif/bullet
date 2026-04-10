@@ -1,4 +1,5 @@
 mod binary;
+pub mod bspline;
 mod inplace;
 mod matmul;
 mod sparse;
@@ -8,6 +9,7 @@ mod unary;
 use std::fmt;
 
 pub use binary::*;
+pub use bspline::*;
 pub use inplace::*;
 pub use matmul::*;
 pub use sparse::*;

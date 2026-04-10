@@ -65,3 +65,7 @@ path = "../../examples/progression/4_multi_layer.rs"
 [[example]]
 name = "relabel"
 path = "../../examples/extra/relabel.rs"
+
+[[example]]
+name = "kan_simple"
+path = "../../examples/kan_simple.rs"

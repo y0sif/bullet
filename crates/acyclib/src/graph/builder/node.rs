@@ -16,6 +16,7 @@ use crate::{
                 GraphIROperationCompilable,
                 affine::Matmul,
                 binary::{Concat, Select, SoftmaxCrossEntropy},
+                bspline::BSplineBasis,
                 nary::LinearCombination,
                 sparse::SparseAffineActivate,
                 unary::{
@@ -279,5 +280,24 @@ where
 {
     pub fn faux_quantise(self, value: f32, round: bool) -> Self {
         self.builder.apply(FauxQuantise { input: self.node, value, round })
+    }
+}
+
+impl<B: BackendMarker> GraphBuilderNode<'_, B>
+where
+    BSplineBasis: GraphIROperationCompilable<B>,
+{
+    /// Evaluate B-spline basis functions for each input feature.
+    ///
+    /// Input shape: (in_features, 1) batched.
+    /// Grid: constant knot vector node of shape (grid_size + 2 * spline_order + 1, 1).
+    /// Output shape: (in_features * (grid_size + spline_order), 1) batched.
+    pub fn bspline_basis(self, grid: Self, grid_size: usize, spline_order: usize) -> Self {
+        self.builder.apply(BSplineBasis {
+            input: self.node,
+            grid: grid.node,
+            grid_size,
+            spline_order,
+        })
     }
 }
