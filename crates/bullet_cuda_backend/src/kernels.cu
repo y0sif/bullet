@@ -614,3 +614,140 @@ BULLET_KERNEL LinearCombStridedKernel(
         this_out[0] = input[col * input_stride + row];
     }
 }
+
+// ======== B-Spline Basis Evaluation (KAN) ========
+
+// Forward: evaluate B-spline basis functions via Cox-de Boor recursion.
+// Each thread handles one (batch_element, input_feature) pair.
+// Grid layout: total_threads = batch_size * in_features
+BULLET_KERNEL bspline_basis_fwd(
+    const int batch_size,
+    const int in_features,
+    const int grid_size,
+    const int spline_order,
+    const float* __restrict__ input,
+    const float* __restrict__ grid,
+    float* __restrict__ output)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * in_features;
+    if (tid >= total) return;
+
+    const int b = tid / in_features;
+    const int j = tid % in_features;
+    const int num_basis = grid_size + spline_order;
+    const int num_knots = grid_size + 2 * spline_order + 1;
+    const int num_degree0 = grid_size + 2 * spline_order;
+
+    const float x = input[b * in_features + j];
+    float* out_ptr = output + b * in_features * num_basis + j * num_basis;
+
+    // Cox-de Boor in local memory (max reasonable size: ~32 elements)
+    // For grid_size=5, spline_order=3: num_degree0=10
+    float prev[32];
+    float curr[32];
+
+    // Degree 0: indicator functions
+    for (int i = 0; i < num_degree0; i++) {
+        prev[i] = (x >= grid[i] && x < grid[i + 1]) ? 1.0f : 0.0f;
+    }
+    // Right boundary
+    if (x >= grid[num_knots - 1]) {
+        for (int i = 0; i < num_degree0; i++) prev[i] = 0.0f;
+        prev[num_degree0 - 1] = 1.0f;
+    }
+
+    // Recursion
+    for (int p = 1; p <= spline_order; p++) {
+        const int num_at_p = num_degree0 - p;
+        for (int i = 0; i < num_at_p; i++) {
+            float val = 0.0f;
+            float denom_left = grid[i + p] - grid[i];
+            if (denom_left != 0.0f)
+                val += (x - grid[i]) / denom_left * prev[i];
+            float denom_right = grid[i + p + 1] - grid[i + 1];
+            if (denom_right != 0.0f)
+                val += (grid[i + p + 1] - x) / denom_right * prev[i + 1];
+            curr[i] = val;
+        }
+        for (int i = 0; i < num_at_p; i++) prev[i] = curr[i];
+    }
+
+    // Write output
+    for (int i = 0; i < num_basis; i++) {
+        out_ptr[i] = prev[i];
+    }
+}
+
+// Backward: compute d(loss)/d(input) given d(loss)/d(basis_output).
+// Uses derivative formula: dB_{i,k}/dx = k * (B_{i,k-1}/(t_{i+k}-t_i) - B_{i+1,k-1}/(t_{i+k+1}-t_{i+1}))
+BULLET_KERNEL bspline_basis_bwd(
+    const int batch_size,
+    const int in_features,
+    const int grid_size,
+    const int spline_order,
+    const float* __restrict__ input,
+    const float* __restrict__ grid,
+    const float* __restrict__ output_grad,
+    float* __restrict__ input_grad)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * in_features;
+    if (tid >= total) return;
+
+    const int b = tid / in_features;
+    const int j = tid % in_features;
+    const int k = spline_order;
+    const int num_basis = grid_size + k;
+    const int num_knots = grid_size + 2 * k + 1;
+    const int num_degree0 = grid_size + 2 * k;
+
+    if (k == 0) return; // degree-0: zero derivative
+
+    const float x = input[b * in_features + j];
+    const int grad_offset = b * in_features * num_basis + j * num_basis;
+
+    float prev[32];
+    float curr[32];
+
+    // Compute degree (k-1) basis values
+    for (int i = 0; i < num_degree0; i++) {
+        prev[i] = (x >= grid[i] && x < grid[i + 1]) ? 1.0f : 0.0f;
+    }
+    if (x >= grid[num_knots - 1]) {
+        for (int i = 0; i < num_degree0; i++) prev[i] = 0.0f;
+        prev[num_degree0 - 1] = 1.0f;
+    }
+
+    for (int p = 1; p < k; p++) {
+        const int num_at_p = num_degree0 - p;
+        for (int i = 0; i < num_at_p; i++) {
+            float val = 0.0f;
+            float denom_left = grid[i + p] - grid[i];
+            if (denom_left != 0.0f)
+                val += (x - grid[i]) / denom_left * prev[i];
+            float denom_right = grid[i + p + 1] - grid[i + 1];
+            if (denom_right != 0.0f)
+                val += (grid[i + p + 1] - x) / denom_right * prev[i + 1];
+            curr[i] = val;
+        }
+        for (int i = 0; i < num_at_p; i++) prev[i] = curr[i];
+    }
+
+    // Derivative formula + chain rule
+    const int num_prev = grid_size + k + 1;
+    float grad_acc = 0.0f;
+    for (int i = 0; i < num_basis; i++) {
+        float deriv = 0.0f;
+        float denom_left = grid[i + k] - grid[i];
+        if (denom_left != 0.0f && i < num_prev)
+            deriv += prev[i] / denom_left;
+        float denom_right = grid[i + k + 1] - grid[i + 1];
+        if (denom_right != 0.0f && (i + 1) < num_prev)
+            deriv -= prev[i + 1] / denom_right;
+        deriv *= (float)k;
+        grad_acc += output_grad[grad_offset + i] * deriv;
+    }
+
+    atomicAdd(&input_grad[b * in_features + j], grad_acc);
+}

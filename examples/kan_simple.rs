@@ -35,7 +35,6 @@ fn main() {
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
-        .use_devices(vec![()])
         .inputs(inputs::Chess768)
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(255),
