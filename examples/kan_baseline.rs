@@ -60,7 +60,7 @@ fn main() {
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
-            batches_per_superbatch: 6104,
+            batches_per_superbatch: 488,  // ~8M positions per superbatch (matches kanue epoch size)
             start_superbatch: 1,
             end_superbatch: 40,
         },
