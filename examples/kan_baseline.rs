@@ -1,10 +1,9 @@
-/// KAN-NNUE training example.
+/// Baseline NNUE training example (for comparison with KAN).
 ///
-/// Architecture: 768 -> ft(128) -> KAN(256->128) -> KAN(128->1) -> sigmoid
+/// Architecture: 768 -> ft(128) -> SCReLU -> 256->128 -> SCReLU -> 128->1 -> sigmoid
 ///
-/// Uses B-spline KAN layers (trainable activation functions on edges)
-/// instead of fixed activation functions like SCReLU or CReLU.
-/// Validated in kanue to produce -22% loss and +2.1pp accuracy over baseline.
+/// Same dimensions as kan_simple.rs but using standard SCReLU activations
+/// instead of KAN layers. Use this to measure the loss improvement from KAN.
 use bullet_lib::{
     game::{
         formats::sfbinpack::{
@@ -13,10 +12,7 @@ use bullet_lib::{
         },
         inputs,
     },
-    nn::{
-        kan::kan_layer,
-        optimiser,
-    },
+    nn::optimiser,
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -26,9 +22,7 @@ use bullet_lib::{
 };
 
 const FT_SIZE: usize = 128;
-const KAN_HIDDEN: usize = 128;
-const GRID_SIZE: usize = 5;
-const SPLINE_ORDER: usize = 3;
+const HIDDEN: usize = 128;
 const SCALE: i32 = 400;
 
 fn main() {
@@ -40,32 +34,30 @@ fn main() {
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
+            SavedFormat::id("l1w").round().quantise::<i8>(64),
+            SavedFormat::id("l1b"),
+            SavedFormat::id("l2w").round().quantise::<i8>(64),
+            SavedFormat::id("l2b"),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
-            // Feature transformer: 768 -> FT_SIZE with SCReLU
+            // Feature transformer: 768 -> FT_SIZE with SCReLU (same as KAN)
             let l0 = builder.new_affine("l0", 768, FT_SIZE);
             let stm_ft = l0.forward(stm_inputs).screlu();
             let ntm_ft = l0.forward(ntm_inputs).screlu();
             let ft_out = stm_ft.concat(ntm_ft); // (2 * FT_SIZE, 1) batched
 
-            // Clamp feature transformer output to [-1, 1] for B-spline grid range
-            let clamped = ft_out.clip_pass_through_grad(-1.0, 1.0);
+            // Hidden layer 1: 256 -> HIDDEN with SCReLU (replaces KAN layer 1)
+            let l1 = builder.new_affine("l1", 2 * FT_SIZE, HIDDEN);
+            let hidden = l1.forward(ft_out).screlu();
 
-            // KAN layer 1: 2*FT_SIZE -> KAN_HIDDEN
-            let kan1 = kan_layer(builder, "kan1", 2 * FT_SIZE, KAN_HIDDEN, GRID_SIZE, SPLINE_ORDER);
-            let hidden = kan1.forward(clamped);
-
-            // Clamp for second KAN layer
-            let hidden_clamped = hidden.clip_pass_through_grad(-1.0, 1.0);
-
-            // KAN layer 2: KAN_HIDDEN -> 1
-            let kan2 = kan_layer(builder, "kan2", KAN_HIDDEN, 1, GRID_SIZE, SPLINE_ORDER);
-            kan2.forward(hidden_clamped)
+            // Output layer: HIDDEN -> 1 (replaces KAN layer 2)
+            let l2 = builder.new_affine("l2", HIDDEN, 1);
+            l2.forward(hidden)
         });
 
     let schedule = TrainingSchedule {
-        net_id: "kan-simple".to_string(),
+        net_id: "kan-baseline".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -85,7 +77,7 @@ fn main() {
         batch_queue_size: 64,
     };
 
-    // Load from SF binpack — same test77 dataset used in kanue experiments
+    // Same test77 dataset as KAN experiment
     let data_loader = {
         let file_path = "data/test77.binpack";
         let buffer_size_mb = 1024;

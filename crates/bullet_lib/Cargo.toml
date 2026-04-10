@@ -69,3 +69,7 @@ path = "../../examples/extra/relabel.rs"
 [[example]]
 name = "kan_simple"
 path = "../../examples/kan_simple.rs"
+
+[[example]]
+name = "kan_baseline"
+path = "../../examples/kan_baseline.rs"
