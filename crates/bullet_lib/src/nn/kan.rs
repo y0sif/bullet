@@ -51,9 +51,8 @@ where
 /// - `out_features`: output dimension
 /// - `grid_size`: number of B-spline grid intervals (default: 5)
 /// - `spline_order`: B-spline degree (default: 3 for cubic)
-///
-/// The grid spans [-1, 1] with uniform knot spacing, extended by
-/// `spline_order` extra knots on each side.
+/// - `grid_range`: (min, max) range for the B-spline grid knots.
+///   Must match the expected input distribution! E.g. (0.0, 1.0) for SCReLU output.
 pub fn kan_layer<'a, B: BackendMarker>(
     builder: &'a GraphBuilder<B>,
     id: &str,
@@ -61,6 +60,7 @@ pub fn kan_layer<'a, B: BackendMarker>(
     out_features: usize,
     grid_size: usize,
     spline_order: usize,
+    grid_range: (f32, f32),
 ) -> KanLayer<'a, B>
 where
     BSplineBasis: GraphIROperationCompilable<B>,
@@ -91,21 +91,22 @@ where
         },
     );
 
-    // Grid: uniform knots spanning [-1, 1] with extensions
-    let h = 2.0 / grid_size as f32;
+    // Grid: uniform knots spanning grid_range with extensions
+    let (grid_min, grid_max) = grid_range;
+    let h = (grid_max - grid_min) / grid_size as f32;
     let mut grid_vals = Vec::with_capacity(num_knots);
 
     // Left extension
     for i in (1..=spline_order).rev() {
-        grid_vals.push(-1.0 - i as f32 * h);
+        grid_vals.push(grid_min - i as f32 * h);
     }
     // Interior knots
     for i in 0..=grid_size {
-        grid_vals.push(-1.0 + i as f32 * h);
+        grid_vals.push(grid_min + i as f32 * h);
     }
     // Right extension
     for i in 1..=spline_order {
-        grid_vals.push(1.0 + i as f32 * h);
+        grid_vals.push(grid_max + i as f32 * h);
     }
     assert_eq!(grid_vals.len(), num_knots);
 
