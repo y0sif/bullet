@@ -169,6 +169,8 @@ where
 
         #[cfg(feature = "cuda")]
         builder.add_custom_pass(bullet_cuda_backend::ops::FuseSparseAffineActivateWithMatmul);
+        #[cfg(feature = "cuda")]
+        builder.add_custom_pass(bullet_cuda_backend::ops::FuseKanLayer);
 
         if self.print_ir {
             builder.dump_ir_on_build();

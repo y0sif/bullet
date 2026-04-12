@@ -36,6 +36,7 @@ fn main() {
         .dual_perspective()
         .optimiser(optimiser::AdamW)
         .inputs(inputs::Chess768)
+        .print_ir()
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(255),
             SavedFormat::id("l0b").round().quantise::<i16>(255),
