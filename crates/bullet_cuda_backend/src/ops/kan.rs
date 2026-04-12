@@ -42,10 +42,8 @@ impl GraphIRSimplePass<CudaMarker> for FuseKanLayer {
     fn try_pass_on_node(&self, ir: &mut GraphIR<CudaMarker>, target: NodeId) -> Result<bool, GraphIRError> {
         let op = ir.get(target)?.op();
 
-        // Look for LinearCombination with exactly 2 items, both weight 1.0
         if let Some(LinearCombination { items, shape: _ }) = downcast(op) {
             if let &[(a_idx, 1.0), (b_idx, 1.0)] = &items[..] {
-                // Try both orderings: (spline, base) and (base, spline)
                 if try_fuse(ir, target, a_idx, b_idx)? {
                     return Ok(true);
                 }
@@ -76,12 +74,11 @@ fn try_fuse(
     let spline_data = ir.get(spline_candidate)?;
     let base_data = ir.get(base_candidate)?;
 
-    // Both matmul nodes should have exactly 1 child (the LinearCombination)
     if spline_data.children() != 1 || base_data.children() != 1 {
         return Ok(false);
     }
 
-    // --- Match spline path: Matmul(spline_weight, BSplineBasis(input, grid)) ---
+    // --- Spline path: Matmul(spline_weight, BSplineBasis(input, grid)) ---
     let Some(Matmul { a: spline_weight, b: basis_node, transa: false, transb: false }) =
         downcast(spline_data.op())
     else {
@@ -97,7 +94,7 @@ fn try_fuse(
         return Ok(false);
     };
 
-    // --- Match base path: Matmul(base_weight, PairwiseMul(Concat(input, Sigmoid(input)))) ---
+    // --- Base path: Matmul(base_weight, PairwiseMul(Concat(input, Sigmoid(input)))) ---
     let Some(Matmul { a: base_weight, b: silu_node, transa: false, transb: false }) =
         downcast(base_data.op())
     else {
@@ -122,7 +119,6 @@ fn try_fuse(
         return Ok(false);
     };
 
-    // concat_a must be the same input as BSplineBasis input
     if concat_a.idx != input.idx {
         return Ok(false);
     }
@@ -138,7 +134,6 @@ fn try_fuse(
         return Ok(false);
     };
 
-    // Sigmoid input must also be the same input
     if sig_input.idx != input.idx {
         return Ok(false);
     }
@@ -148,26 +143,16 @@ fn try_fuse(
     let num_basis = grid_size + spline_order;
     let out_features = spline_weight.shape.rows();
 
-    // spline_weight: (D_out, D_in * num_basis)
     if spline_weight.shape.cols() != in_features * num_basis {
         return Ok(false);
     }
-    // base_weight: (D_out, D_in)
     if base_weight.shape.rows() != out_features || base_weight.shape.cols() != in_features {
         return Ok(false);
     }
 
-    // All checks passed — replace with FusedKanLayer
     ir.replace(
         target,
-        FusedKanLayer {
-            input,
-            grid,
-            spline_weight,
-            base_weight,
-            grid_size,
-            spline_order,
-        },
+        FusedKanLayer { input, grid, spline_weight, base_weight, grid_size, spline_order },
     )?;
 
     Ok(true)
@@ -193,12 +178,9 @@ impl GraphIROperationBase<CudaMarker> for FusedKanLayer {
     }
 
     fn output_shape(&self, ir: &GraphIR<CudaMarker>) -> Result<Shape, GraphIRError> {
-        // input: batched, dense
         util::check_dense_eq(ir, &self.input, true)?;
-        // grid: not batched, constant
         util::check_dense_eq(ir, &self.grid, true)?;
         util::check_not_batched(ir, &self.grid)?;
-        // weights: not batched, require grad
         util::check_dense_eq(ir, &self.spline_weight, true)?;
         util::check_dense_eq(ir, &self.base_weight, true)?;
         util::check_not_batched(ir, &self.spline_weight)?;
@@ -209,7 +191,6 @@ impl GraphIROperationBase<CudaMarker> for FusedKanLayer {
         let num_basis = self.grid_size + self.spline_order;
         let out_features = self.spline_weight.shape.rows();
 
-        // Validate dimensions
         if self.input.shape.cols() != 1 {
             return Err(GraphIRError::Op(GraphIROperationError::InvalidInputShape(self.input.shape)));
         }
@@ -246,21 +227,18 @@ impl GraphIROperationBase<CudaMarker> for FusedKanLayer {
 
         Ok(vec![
             // Ancillary 0: basis values (D_in * num_basis, 1) batched
+            // Forward: stores basis. Backward: reused as basis_grad temp.
             (Shape::new(in_features * num_basis, 1), None, true),
             // Ancillary 1: SiLU values (D_in, 1) batched
+            // Forward: stores silu. Backward: reused as silu_grad temp.
             (Shape::new(in_features, 1), None, true),
         ])
     }
 
     fn shorthand(&self) -> String {
-        format!(
-            "FusedKanLayer(grid={}, order={})",
-            self.grid_size, self.spline_order
-        )
+        format!("FusedKanLayer(grid={}, order={})", self.grid_size, self.spline_order)
     }
 }
-
-const MAXIMUM_BLOCKS_Y: i32 = 32768;
 
 impl GraphIROperationCompilable<CudaMarker> for FusedKanLayer {
     fn forward_pass(&self, graph: &Graph<CudaDevice>, output_node: NodeId) -> DeviceFunction<CudaDevice> {
@@ -274,60 +252,81 @@ impl GraphIROperationCompilable<CudaMarker> for FusedKanLayer {
         let anc_silu = graph.get_ref(output_node, GraphNodeIdTy::Ancillary(1));
         let output = graph.get_ref(output_node, GraphNodeIdTy::Values);
 
-        // Update batch sizes
-        func.push(MaybeUpdateBatchSize { input: input.clone(), output: anc_basis.clone() });
-        func.push(MaybeUpdateBatchSize { input: input.clone(), output: anc_silu.clone() });
-        func.push(MaybeUpdateBatchSize { input: input.clone(), output: output.clone() });
-
         let in_features = self.input.shape.rows();
         let out_features = self.spline_weight.shape.rows();
         let num_basis = self.grid_size + self.spline_order;
         let num_knots = self.grid_size + 2 * self.spline_order + 1;
 
-        let layout = None;
-        let mutable = false;
+        // Update batch sizes
+        func.push(MaybeUpdateBatchSize { input: input.clone(), output: anc_basis.clone() });
+        func.push(MaybeUpdateBatchSize { input: input.clone(), output: anc_silu.clone() });
+        func.push(MaybeUpdateBatchSize { input: input.clone(), output: output.clone() });
 
-        let inputs = vec![
-            KernelInput::Size(Expr::Var), // batch_size
-            KernelInput::Slice { slice: input, layout, mutable, batched: true, shape: self.input.shape },
-            KernelInput::Slice { slice: grid, layout, mutable, batched: false, shape: self.grid.shape },
-            KernelInput::Slice { slice: spline_weight, layout, mutable, batched: false, shape: self.spline_weight.shape },
-            KernelInput::Slice { slice: base_weight, layout, mutable, batched: false, shape: self.base_weight.shape },
-            KernelInput::Slice { slice: output, layout, mutable: true, batched: true, shape: Shape::new(out_features, 1) },
-            KernelInput::Slice { slice: anc_basis, layout, mutable: true, batched: true, shape: Shape::new(in_features * num_basis, 1) },
-            KernelInput::Slice { slice: anc_silu, layout, mutable: true, batched: true, shape: Shape::new(in_features, 1) },
-        ];
+        // --- Step 1: Fused BSplineBasis + SiLU kernel ---
+        // Replaces 4 separate ops: BSplineBasis + Sigmoid + Concat + PairwiseMul
+        {
+            let inputs = vec![
+                KernelInput::Size(Expr::Var), // batch_size
+                KernelInput::Slice { slice: input.clone(), layout: None, mutable: false, batched: true, shape: self.input.shape },
+                KernelInput::Slice { slice: grid, layout: None, mutable: false, batched: false, shape: self.grid.shape },
+                KernelInput::Slice { slice: anc_basis.clone(), layout: None, mutable: true, batched: true, shape: Shape::new(in_features * num_basis, 1) },
+                KernelInput::Slice { slice: anc_silu.clone(), layout: None, mutable: true, batched: true, shape: Shape::new(in_features, 1) },
+            ];
 
-        // One block per batch element
-        let threads = in_features.max(out_features).min(1024) as i32;
-        let maxy = Expr::Const(MAXIMUM_BLOCKS_Y);
-        let batch_size = Expr::Var;
-        let ky = batch_size.min(&maxy);
-        let kx = (batch_size + maxy.clone() - 1) / maxy;
-        let grid_dim = [kx, ky, Expr::Const(1)];
-        let block_dim = [Expr::Const(threads), Expr::Const(1), Expr::Const(1)];
+            let threads = 256i32;
+            let total = Expr::Var * Expr::Const(in_features as i32);
+            let blocks = (total + Expr::Const(threads - 1)) / Expr::Const(threads);
+            let grid_dim = [blocks, Expr::Const(1), Expr::Const(1)];
+            let block_dim = [Expr::Const(threads), Expr::Const(1), Expr::Const(1)];
 
-        // Shared memory: grid[num_knots] + basis[D_in * num_basis] + silu[D_in]
-        let shared_bytes = (num_knots + in_features * num_basis + in_features) * 4;
-        let shared_mem_bytes = Expr::Const(shared_bytes as i32);
+            let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes: Expr::Const(0) };
 
-        let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes };
+            let code = include_str!("kan/fwd.cu")
+                .lines()
+                .skip(7)
+                .map(|x| format!("{x}\n"))
+                .collect::<String>()
+                .replace("DECL_D_IN", &in_features.to_string())
+                .replace("DECL_NUM_BASIS", &num_basis.to_string())
+                .replace("DECL_GRID_SIZE", &self.grid_size.to_string())
+                .replace("DECL_SPLINE_ORDER", &self.spline_order.to_string())
+                .replace("DECL_NUM_KNOTS", &num_knots.to_string());
 
-        let code = include_str!("kan/fwd.cu")
-            .lines()
-            .skip(9) // skip #ifndef block
-            .map(|x| format!("{x}\n"))
-            .collect::<String>()
-            .replace("DECL_MAXY", &MAXIMUM_BLOCKS_Y.to_string())
-            .replace("DECL_D_IN", &in_features.to_string())
-            .replace("DECL_D_OUT", &out_features.to_string())
-            .replace("DECL_NUM_BASIS", &num_basis.to_string())
-            .replace("DECL_GRID_SIZE", &self.grid_size.to_string())
-            .replace("DECL_SPLINE_ORDER", &self.spline_order.to_string())
-            .replace("DECL_NUM_KNOTS", &num_knots.to_string());
+            let kernel = unsafe { Kernel::new("FusedBasisSiLU".to_string(), code, args) };
+            func.push(kernel.unwrap());
+        }
 
-        let kernel = unsafe { Kernel::new("FusedKanLayerFwd".to_string(), code, args) };
-        func.push(kernel.unwrap());
+        // --- Step 2: output = spline_weight @ basis (cuBLAS GEMM) ---
+        // spline_weight: (D_out, D_in*num_basis) not batched
+        // basis: (D_in*num_basis, 1) batched → NobBat
+        // Result: (D_out, 1) batched, beta=0 (overwrite)
+        func.push(acyclib::device::function::Matmul {
+            cfg: GemmConfig::new(
+                1.0, 0.0,
+                self.spline_weight.shape, false,
+                Shape::new(in_features * num_basis, 1), false,
+            ),
+            input_a: spline_weight,
+            input_b: anc_basis,
+            output: output.clone(),
+            ty: MatmulType::NobBat,
+        });
+
+        // --- Step 3: output += base_weight @ silu (cuBLAS GEMM, accumulate) ---
+        // base_weight: (D_out, D_in) not batched
+        // silu: (D_in, 1) batched → NobBat
+        // Result: (D_out, 1) batched, beta=1 (accumulate into existing output)
+        func.push(acyclib::device::function::Matmul {
+            cfg: GemmConfig::new(
+                1.0, 1.0,
+                self.base_weight.shape, false,
+                Shape::new(in_features, 1), false,
+            ),
+            input_a: base_weight,
+            input_b: anc_silu,
+            output,
+            ty: MatmulType::NobBat,
+        });
 
         func
     }
@@ -348,21 +347,16 @@ impl GraphIROperationCompilable<CudaMarker> for FusedKanLayer {
         let num_basis = self.grid_size + self.spline_order;
         let num_knots = self.grid_size + 2 * self.spline_order + 1;
 
-        // --- Weight gradients via GEMM ---
-        // sw_grad += output_grad @ basis^T
-        // output_grad: (D_out, 1) batched, basis: (D_in * num_basis, 1) batched
-        // This is an outer product reduced across batch → BatBatRed
-        if let Some(sw_grad) = graph.maybe_get_ref(self.spline_weight.idx, GraphNodeIdTy::Gradients) {
-            func.push(MaybeUpdateBatchSize {
-                input: spline_weight.clone(),
-                output: sw_grad.clone(),
-            });
+        // --- Weight gradients via GEMM (must run BEFORE input grad GEMMs reuse ancillary) ---
 
+        // sw_grad += output_grad @ basis^T (BatBatRed)
+        if let Some(sw_grad) = graph.maybe_get_ref(self.spline_weight.idx, GraphNodeIdTy::Gradients) {
+            func.push(MaybeUpdateBatchSize { input: spline_weight.clone(), output: sw_grad.clone() });
             func.push(acyclib::device::function::Matmul {
                 cfg: GemmConfig::new(
-                    1.0, 1.0, // alpha=1, beta=1 (accumulate)
-                    Shape::new(out_features, 1), false,      // output_grad: (D_out, 1)
-                    Shape::new(in_features * num_basis, 1), true, // basis^T: (1, D_in*num_basis)
+                    1.0, 1.0,
+                    Shape::new(out_features, 1), false,
+                    Shape::new(in_features * num_basis, 1), true,
                 ),
                 input_a: output_grad.clone(),
                 input_b: anc_basis.clone(),
@@ -371,13 +365,9 @@ impl GraphIROperationCompilable<CudaMarker> for FusedKanLayer {
             });
         }
 
-        // bw_grad += output_grad @ silu^T
+        // bw_grad += output_grad @ silu^T (BatBatRed)
         if let Some(bw_grad) = graph.maybe_get_ref(self.base_weight.idx, GraphNodeIdTy::Gradients) {
-            func.push(MaybeUpdateBatchSize {
-                input: base_weight.clone(),
-                output: bw_grad.clone(),
-            });
-
+            func.push(MaybeUpdateBatchSize { input: base_weight.clone(), output: bw_grad.clone() });
             func.push(acyclib::device::function::Matmul {
                 cfg: GemmConfig::new(
                     1.0, 1.0,
@@ -385,61 +375,73 @@ impl GraphIROperationCompilable<CudaMarker> for FusedKanLayer {
                     Shape::new(in_features, 1), true,
                 ),
                 input_a: output_grad.clone(),
-                input_b: anc_silu,
+                input_b: anc_silu.clone(),
                 output: bw_grad,
                 ty: MatmulType::BatBatRed,
             });
         }
 
-        // --- Input gradient via fused custom kernel ---
+        // --- Input gradient ---
         if let Some(input_grad) = graph.maybe_get_ref(self.input.idx, GraphNodeIdTy::Gradients) {
-            func.push(MaybeUpdateBatchSize {
-                input: input.clone(),
-                output: input_grad.clone(),
+            func.push(MaybeUpdateBatchSize { input: input.clone(), output: input_grad.clone() });
+
+            // Overwrite ancillary 0 with basis_grad = spline_weight^T @ output_grad
+            // (safe: weight grad GEMMs above already read ancillary 0)
+            func.push(acyclib::device::function::Matmul {
+                cfg: GemmConfig::new(
+                    1.0, 0.0,
+                    self.spline_weight.shape, true,  // (D_in*num_basis, D_out)
+                    Shape::new(out_features, 1), false,
+                ),
+                input_a: spline_weight,
+                input_b: output_grad.clone(),
+                output: anc_basis.clone(),  // overwrite with basis_grad
+                ty: MatmulType::NobBat,
             });
 
-            let layout = None;
-            let mutable = false;
+            // Overwrite ancillary 1 with silu_grad = base_weight^T @ output_grad
+            func.push(acyclib::device::function::Matmul {
+                cfg: GemmConfig::new(
+                    1.0, 0.0,
+                    self.base_weight.shape, true,  // (D_in, D_out)
+                    Shape::new(out_features, 1), false,
+                ),
+                input_a: base_weight,
+                input_b: output_grad,
+                output: anc_silu.clone(),  // overwrite with silu_grad
+                ty: MatmulType::NobBat,
+            });
 
+            // Fused bspline derivative + SiLU derivative kernel
             let inputs = vec![
-                KernelInput::Size(Expr::Var), // batch_size
-                KernelInput::Slice { slice: input, layout, mutable, batched: true, shape: self.input.shape },
-                KernelInput::Slice { slice: grid, layout, mutable, batched: false, shape: self.grid.shape },
-                KernelInput::Slice { slice: spline_weight, layout, mutable, batched: false, shape: self.spline_weight.shape },
-                KernelInput::Slice { slice: base_weight, layout, mutable, batched: false, shape: self.base_weight.shape },
-                KernelInput::Slice { slice: output_grad, layout, mutable, batched: true, shape: Shape::new(out_features, 1) },
-                KernelInput::Slice { slice: input_grad, layout, mutable: true, batched: true, shape: self.input.shape },
+                KernelInput::Size(Expr::Var),
+                KernelInput::Slice { slice: input, layout: None, mutable: false, batched: true, shape: self.input.shape },
+                KernelInput::Slice { slice: grid, layout: None, mutable: false, batched: false, shape: self.grid.shape },
+                KernelInput::Slice { slice: anc_basis, layout: None, mutable: false, batched: true, shape: Shape::new(in_features * num_basis, 1) },
+                KernelInput::Slice { slice: anc_silu, layout: None, mutable: false, batched: true, shape: Shape::new(in_features, 1) },
+                KernelInput::Slice { slice: input_grad, layout: None, mutable: true, batched: true, shape: self.input.shape },
             ];
 
-            // One block per batch element
-            let threads = in_features.min(1024) as i32;
-            let maxy = Expr::Const(MAXIMUM_BLOCKS_Y);
-            let batch_size = Expr::Var;
-            let ky = batch_size.min(&maxy);
-            let kx = (batch_size + maxy.clone() - 1) / maxy;
-            let grid_dim = [kx, ky, Expr::Const(1)];
+            let threads = 256i32;
+            let total = Expr::Var * Expr::Const(in_features as i32);
+            let blocks = (total + Expr::Const(threads - 1)) / Expr::Const(threads);
+            let grid_dim = [blocks, Expr::Const(1), Expr::Const(1)];
             let block_dim = [Expr::Const(threads), Expr::Const(1), Expr::Const(1)];
 
-            // Shared memory: grid[num_knots] + output_grad[D_out]
-            let shared_bytes = (num_knots + out_features) * 4;
-            let shared_mem_bytes = Expr::Const(shared_bytes as i32);
-
-            let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes };
+            let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes: Expr::Const(0) };
 
             let code = include_str!("kan/bwd_input.cu")
                 .lines()
-                .skip(9)
+                .skip(7)
                 .map(|x| format!("{x}\n"))
                 .collect::<String>()
-                .replace("DECL_MAXY", &MAXIMUM_BLOCKS_Y.to_string())
                 .replace("DECL_D_IN", &in_features.to_string())
-                .replace("DECL_D_OUT", &out_features.to_string())
                 .replace("DECL_NUM_BASIS", &num_basis.to_string())
                 .replace("DECL_GRID_SIZE", &self.grid_size.to_string())
                 .replace("DECL_SPLINE_ORDER", &self.spline_order.to_string())
                 .replace("DECL_NUM_KNOTS", &num_knots.to_string());
 
-            let kernel = unsafe { Kernel::new("FusedKanLayerBwdInput".to_string(), code, args) };
+            let kernel = unsafe { Kernel::new("FusedBwdInputGrad".to_string(), code, args) };
             func.push(kernel.unwrap());
         }
 
