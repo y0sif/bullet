@@ -42,21 +42,21 @@ fn main() {
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
-            // Feature transformer: 768 -> FT_SIZE with SCReLU (outputs in [0, 1])
+            // Feature transformer: 768 -> FT_SIZE with CReLU (matches kanue setup)
             let l0 = builder.new_affine("l0", 768, FT_SIZE);
-            let stm_ft = l0.forward(stm_inputs).screlu();
-            let ntm_ft = l0.forward(ntm_inputs).screlu();
+            let stm_ft = l0.forward(stm_inputs).crelu();
+            let ntm_ft = l0.forward(ntm_inputs).crelu();
             let ft_out = stm_ft.concat(ntm_ft); // (2 * FT_SIZE, 1) batched, values in [0, 1]
 
-            // KAN layer 1: grid [0, 1] to match SCReLU output range
-            let kan1 = kan_layer(builder, "kan1", 2 * FT_SIZE, KAN_HIDDEN, GRID_SIZE, SPLINE_ORDER, (0.0, 1.0));
+            // KAN layer 1: grid [-1, 1] (same as kanue default)
+            let kan1 = kan_layer(builder, "kan1", 2 * FT_SIZE, KAN_HIDDEN, GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0));
             let hidden = kan1.forward(ft_out);
 
-            // Clamp KAN output to [0, 1] for second layer's grid range
-            let hidden_clamped = hidden.clip_pass_through_grad(0.0, 1.0);
+            // Clamp KAN output to [-1, 1] for second layer's grid range
+            let hidden_clamped = hidden.clip_pass_through_grad(-1.0, 1.0);
 
-            // KAN layer 2: grid [0, 1]
-            let kan2 = kan_layer(builder, "kan2", KAN_HIDDEN, 1, GRID_SIZE, SPLINE_ORDER, (0.0, 1.0));
+            // KAN layer 2: grid [-1, 1]
+            let kan2 = kan_layer(builder, "kan2", KAN_HIDDEN, 1, GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0));
             kan2.forward(hidden_clamped)
         });
 

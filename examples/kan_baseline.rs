@@ -40,15 +40,15 @@ fn main() {
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
-            // Feature transformer: 768 -> FT_SIZE with SCReLU (same as KAN)
+            // Feature transformer: 768 -> FT_SIZE with CReLU (matches kanue setup)
             let l0 = builder.new_affine("l0", 768, FT_SIZE);
-            let stm_ft = l0.forward(stm_inputs).screlu();
-            let ntm_ft = l0.forward(ntm_inputs).screlu();
+            let stm_ft = l0.forward(stm_inputs).crelu();
+            let ntm_ft = l0.forward(ntm_inputs).crelu();
             let ft_out = stm_ft.concat(ntm_ft); // (2 * FT_SIZE, 1) batched
 
-            // Hidden layer 1: 256 -> HIDDEN with SCReLU (replaces KAN layer 1)
+            // Hidden layer 1: 256 -> HIDDEN with CReLU (replaces KAN layer 1)
             let l1 = builder.new_affine("l1", 2 * FT_SIZE, HIDDEN);
-            let hidden = l1.forward(ft_out).screlu();
+            let hidden = l1.forward(ft_out).crelu();
 
             // Output layer: HIDDEN -> 1 (replaces KAN layer 2)
             let l2 = builder.new_affine("l2", HIDDEN, 1);
