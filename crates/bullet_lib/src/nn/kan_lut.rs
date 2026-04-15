@@ -188,11 +188,12 @@ pub fn kan_lut_save_format(
     quant_scale: i16,
 ) -> SavedFormat {
     let id = id.to_string();
+    let max_val = 127.0 / quant_scale as f32;
     SavedFormat::empty()
         .transform(move |store, _| {
             let sw = store.get(&format!("{id}_sw"));
             let bw = store.get(&format!("{id}_bw"));
-            sample_kan_lut(
+            let lut = sample_kan_lut(
                 &sw.values,
                 &bw.values,
                 in_features,
@@ -202,7 +203,9 @@ pub fn kan_lut_save_format(
                 grid_range,
                 sample_range,
                 num_samples,
-            )
+            );
+            // Clamp to representable i8 range to prevent quantization overflow
+            lut.into_iter().map(|v| v.clamp(-max_val, max_val)).collect()
         })
         .round()
         .quantise::<i8>(quant_scale)

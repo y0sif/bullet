@@ -32,7 +32,7 @@ const GRID_SIZE: usize = 5;
 const SPLINE_ORDER: usize = 3;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
-const Q_KAN: i16 = 127;
+const Q_KAN: i16 = 64;
 const NUM_LUT_SAMPLES: usize = 64;
 
 fn main() {
