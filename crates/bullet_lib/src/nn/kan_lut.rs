@@ -8,7 +8,7 @@
 //! 2. Quantize the sampled values to int8/int16
 //! 3. Export via Bullet's `SavedFormat` system
 //!
-//! Engine inference then becomes: `y[j] = sum_i lut[j][i][bucket(x[i])]`
+//! Engine inference becomes: `y[j] += lut[i][bucket(x[i])][j]` (input-major for cache locality)
 
 use acyclib::graph::save::SavedFormat;
 
@@ -93,27 +93,16 @@ fn make_grid(grid_size: usize, spline_order: usize, grid_range: (f32, f32)) -> V
 
 /// Sample the full KAN LUT from raw weight data.
 ///
-/// For each output neuron j and input feature i, evaluates the learned
-/// activation function at `num_samples` evenly-spaced points in `sample_range`:
+/// For each edge (i, j), evaluates the learned activation at `num_samples`
+/// evenly-spaced points in `sample_range`:
 ///
 /// ```text
-/// lut[j][i][k] = sw[j, i*nb..(i+1)*nb] · basis(x_k) + bw[j, i] · silu(x_k)
+/// lut[i][k][j] = sw[j, i*nb..(i+1)*nb] · basis(x_k) + bw[j, i] · silu(x_k)
 /// ```
 ///
-/// Returns a flat `Vec<f32>` with layout `[out_features][in_features][num_samples]`,
-/// suitable for quantization via `SavedFormat`.
-///
-/// # Arguments
-///
-/// * `sw_vals` - Spline weights, column-major `(out_features, in_features * num_basis)`
-/// * `bw_vals` - Base weights, column-major `(out_features, in_features)`
-/// * `in_features` - Input dimension
-/// * `out_features` - Output dimension
-/// * `grid_size` - Number of B-spline grid intervals
-/// * `spline_order` - B-spline degree
-/// * `grid_range` - (min, max) for the B-spline knot vector
-/// * `sample_range` - (min, max) range to sample (should match actual input range)
-/// * `num_samples` - Number of evenly-spaced sample points (typically 256)
+/// Returns a flat `Vec<f32>` with layout `[in_features][num_samples][out_features]`.
+/// This layout is cache-friendly for inference: for a given input i with index k,
+/// all output weights `lut[i][k][0..out]` are contiguous.
 pub fn sample_kan_lut(
     sw_vals: &[f32],
     bw_vals: &[f32],
@@ -152,13 +141,13 @@ pub fn sample_kan_lut(
     // Precompute SiLU at all sample points
     let silu_at_samples: Vec<f32> = sample_points.iter().map(|&x| silu(x)).collect();
 
-    // Build LUT: layout [out_features][in_features][num_samples]
-    let total_size = out_features * in_features * num_samples;
+    // Build LUT: layout [in_features][num_samples][out_features]
+    let total_size = in_features * num_samples * out_features;
     let mut lut = vec![0.0f32; total_size];
 
-    for j in 0..out_features {
-        for i in 0..in_features {
-            for k in 0..num_samples {
+    for i in 0..in_features {
+        for k in 0..num_samples {
+            for j in 0..out_features {
                 // Spline path: sw[j, i*nb..(i+1)*nb] · basis(x_k)
                 let mut val = 0.0f32;
                 for b in 0..num_basis {
@@ -172,7 +161,7 @@ pub fn sample_kan_lut(
                 let bw_idx = i * out_features + j;
                 val += bw_vals[bw_idx] * silu_at_samples[k];
 
-                lut[j * in_features * num_samples + i * num_samples + k] = val;
+                lut[i * num_samples * out_features + k * out_features + j] = val;
             }
         }
     }
@@ -180,26 +169,13 @@ pub fn sample_kan_lut(
     lut
 }
 
-/// Generate `SavedFormat` entries for a KAN layer's LUT export.
-///
-/// Returns a single `SavedFormat` that samples the trained B-spline activation
-/// at `num_samples` points, producing a quantized lookup table.
+/// Generate `SavedFormat` entry for a KAN layer's LUT export (i8, cache-friendly layout).
 ///
 /// # Binary layout
 ///
-/// The LUT is stored as `[out_features][in_features][num_samples]` in row-major order,
-/// quantized to the specified integer type.
-///
-/// # Arguments
-///
-/// * `id` - Weight name prefix (e.g. "kan1")
-/// * `in_features` - Input dimension
-/// * `out_features` - Output dimension
-/// * `grid_size` - Number of B-spline grid intervals
-/// * `spline_order` - B-spline degree
-/// * `grid_range` - (min, max) for the B-spline knot vector
-/// * `sample_range` - (min, max) input range to sample
-/// * `num_samples` - Number of sample points per edge (typically 256)
+/// The LUT is stored as `[in_features][num_samples][out_features]` with i8 quantization.
+/// This layout is cache-friendly: for a given input with index k, the output weights
+/// `lut[i][k][0..out]` are contiguous in memory.
 pub fn kan_lut_save_format(
     id: &str,
     in_features: usize,
@@ -229,7 +205,7 @@ pub fn kan_lut_save_format(
             )
         })
         .round()
-        .quantise::<i16>(quant_scale)
+        .quantise::<i8>(quant_scale)
 }
 
 #[cfg(test)]
@@ -326,11 +302,12 @@ mod tests {
         assert_eq!(lut.len(), out_features * in_features * num_samples);
 
         // For each input feature, LUT should be silu(x) at the sample points
+        // Layout: [in][sample][out]
         for i in 0..in_features {
             for k in 0..num_samples {
                 let x = k as f32 / (num_samples - 1) as f32; // sample in [0, 1]
                 let expected = silu(x);
-                let actual = lut[0 * in_features * num_samples + i * num_samples + k];
+                let actual = lut[i * num_samples * out_features + k * out_features + 0];
                 assert!(
                     (actual - expected).abs() < 1e-6,
                     "LUT mismatch at i={i}, k={k}: expected={expected}, actual={actual}"
@@ -367,11 +344,12 @@ mod tests {
         );
 
         // LUT should equal B_0(x) at each sample point
+        // Layout: [in][sample][out], with in=1, out=1 → flat [sample]
         for k in 0..num_samples {
             let x = -1.0 + 2.0 * k as f32 / (num_samples - 1) as f32;
             let basis = eval_bspline_basis(x, &grid, grid_size, spline_order);
             let expected = basis[0]; // first basis function
-            let actual = lut[k];
+            let actual = lut[k]; // [0][k][0] = k for in=1, out=1
             assert!(
                 (actual - expected).abs() < 1e-6,
                 "Spline-only LUT mismatch at k={k}, x={x}: expected={expected}, actual={actual}"

@@ -33,7 +33,7 @@ const SPLINE_ORDER: usize = 3;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
 const Q_KAN: i16 = 127;
-const NUM_LUT_SAMPLES: usize = 256;
+const NUM_LUT_SAMPLES: usize = 64;
 
 fn main() {
     let mut trainer = ValueTrainerBuilder::default()
