@@ -3,6 +3,7 @@ pub mod blas;
 pub mod bspline;
 pub mod cmp;
 pub mod multi;
+pub mod relu_kan;
 pub mod sparse;
 
 use std::sync::Arc;

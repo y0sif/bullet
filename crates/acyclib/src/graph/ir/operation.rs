@@ -2,6 +2,7 @@ pub mod affine;
 pub mod binary;
 pub mod bspline;
 pub mod nary;
+pub mod relu_kan;
 pub mod sparse;
 pub mod unary;
 pub mod util;

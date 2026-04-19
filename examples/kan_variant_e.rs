@@ -1,10 +1,10 @@
-/// KAN-NNUE training example.
+/// Phase A variant E — ReLU-KAN (arXiv 2406.02075).
 ///
-/// Architecture: 768 -> ft(128) -> KAN(256->128) -> KAN(128->1) -> sigmoid
+/// Architecture: 768 -> ft(128) CReLU -> ReluKAN(256->128) -> ReluKAN(128->1)
+/// Pure basis, no base path, per the paper.
 ///
-/// Uses B-spline KAN layers (trainable activation functions on edges)
-/// instead of fixed activation functions like SCReLU or CReLU.
-/// Validated in kanue to produce -22% loss and +2.1pp accuracy over baseline.
+/// The first layer receives CReLU output in [0, 1] — grid matches.
+/// Output of layer 1 is clamped to [-1, 1] to match layer 2's grid range.
 use bullet_lib::{
     game::{
         formats::sfbinpack::{
@@ -13,11 +13,7 @@ use bullet_lib::{
         },
         inputs,
     },
-    nn::{
-        kan::kan_layer,
-        kan_lut::kan_lut_save_format,
-        optimiser,
-    },
+    nn::{optimiser, relu_kan::relu_kan_layer},
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -29,63 +25,43 @@ use bullet_lib::{
 const FT_SIZE: usize = 128;
 const KAN_HIDDEN: usize = 128;
 const GRID_SIZE: usize = 5;
-const SPLINE_ORDER: usize = 3;
+const SUPPORT_WIDTH: usize = 3; // `k` in the ReLU-KAN paper
 const SCALE: i32 = 400;
 const QA: i16 = 255;
-const Q_KAN: i16 = 64;
-const NUM_LUT_SAMPLES: usize = 64;
 
 fn main() {
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
         .inputs(inputs::Chess768)
-        .print_ir()
         .save_format(&[
-            // Feature transformer: 768 -> FT_SIZE, quantized to i16 with QA
             SavedFormat::id("l0w").round().quantise::<i16>(QA),
             SavedFormat::id("l0b").round().quantise::<i16>(QA),
-            // KAN layer 1: LUT sampled from trained B-splines
-            // Input range [0, 1] (CReLU output), grid range [-1, 1]
-            kan_lut_save_format(
-                "kan1", 2 * FT_SIZE, KAN_HIDDEN,
-                GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0),
-                (0.0, 1.0), NUM_LUT_SAMPLES, Q_KAN,
-            ),
-            // KAN layer 2: LUT sampled from trained B-splines
-            // Input range [-1, 1] (clip_pass_through_grad output), grid range [-1, 1]
-            kan_lut_save_format(
-                "kan2", KAN_HIDDEN, 1,
-                GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0),
-                (-1.0, 1.0), NUM_LUT_SAMPLES, Q_KAN,
-            ),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
-            // Feature transformer: 768 -> FT_SIZE with CReLU (matches kanue setup)
             let l0 = builder.new_affine("l0", 768, FT_SIZE);
             let stm_ft = l0.forward(stm_inputs).crelu();
             let ntm_ft = l0.forward(ntm_inputs).crelu();
-            let ft_out = stm_ft.concat(ntm_ft); // (2 * FT_SIZE, 1) batched, values in [0, 1]
+            let ft_out = stm_ft.concat(ntm_ft); // values in [0, 1]
 
-            // KAN layer 1: grid [-1, 1] (same as kanue default), SiLU base
-            let kan1 = kan_layer(builder, "kan1", 2 * FT_SIZE, KAN_HIDDEN, GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0), true);
-            let hidden = kan1.forward(ft_out, |x| x * x.sigmoid());
+            // ReLU-KAN layer 1: input range [0, 1] (CReLU output)
+            let kan1 = relu_kan_layer(builder, "kan1", 2 * FT_SIZE, KAN_HIDDEN, GRID_SIZE, SUPPORT_WIDTH, (0.0, 1.0));
+            let hidden = kan1.forward(ft_out);
 
-            // Clamp KAN output to [-1, 1] for second layer's grid range
             let hidden_clamped = hidden.clip_pass_through_grad(-1.0, 1.0);
 
-            // KAN layer 2: grid [-1, 1], SiLU base
-            let kan2 = kan_layer(builder, "kan2", KAN_HIDDEN, 1, GRID_SIZE, SPLINE_ORDER, (-1.0, 1.0), true);
-            kan2.forward(hidden_clamped, |x| x * x.sigmoid())
+            // ReLU-KAN layer 2: input range [-1, 1] (clipped hidden)
+            let kan2 = relu_kan_layer(builder, "kan2", KAN_HIDDEN, 1, GRID_SIZE, SUPPORT_WIDTH, (-1.0, 1.0));
+            kan2.forward(hidden_clamped)
         });
 
     let schedule = TrainingSchedule {
-        net_id: "kan-simple".to_string(),
+        net_id: "kan-variant-e".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
-            batches_per_superbatch: 488,  // ~8M positions per superbatch (matches kanue epoch size)
+            batches_per_superbatch: 488,
             start_superbatch: 1,
             end_superbatch: 40,
         },
@@ -101,7 +77,6 @@ fn main() {
         batch_queue_size: 64,
     };
 
-    // Load from SF binpack — same test77 dataset used in kanue experiments
     let data_loader = {
         let file_path = "data/test77.binpack";
         let buffer_size_mb = 1024;

@@ -751,3 +751,91 @@ BULLET_KERNEL bspline_basis_bwd(
 
     atomicAdd(&input_grad[b * in_features + j], grad_acc);
 }
+
+// ======== ReLU-KAN Basis Evaluation (arXiv 2406.02075) ========
+
+// Forward: R_i(x) = [ReLU(e_i - x) * ReLU(x - s_i)]^2 * 16 / (e_i - s_i)^4
+// Grid layout: s_0..s_{num_basis-1} followed by e_0..e_{num_basis-1}.
+// One thread per (batch_element, input_feature).
+BULLET_KERNEL relu_kan_basis_fwd(
+    const int batch_size,
+    const int in_features,
+    const int grid_size,
+    const int support_width,
+    const float* __restrict__ input,
+    const float* __restrict__ grid,
+    float* __restrict__ output)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * in_features;
+    if (tid >= total) return;
+
+    const int b = tid / in_features;
+    const int j = tid % in_features;
+    const int num_basis = grid_size + support_width;
+
+    const float* s_grid = grid;
+    const float* e_grid = grid + num_basis;
+
+    const float x = input[b * in_features + j];
+    float* out_ptr = output + b * in_features * num_basis + j * num_basis;
+
+    for (int i = 0; i < num_basis; i++) {
+        float u = e_grid[i] - x;
+        if (u < 0.0f) u = 0.0f;
+        float v = x - s_grid[i];
+        if (v < 0.0f) v = 0.0f;
+        float width = e_grid[i] - s_grid[i];
+        float norm = 0.0f;
+        if (width > 0.0f) {
+            float w2 = width * width;
+            norm = 16.0f / (w2 * w2);
+        }
+        float uv = u * v;
+        out_ptr[i] = norm * uv * uv;
+    }
+}
+
+// Backward: d/dx (u*v)^2 * norm = 2 * norm * u * v * (u - v) when s < x < e, else 0.
+BULLET_KERNEL relu_kan_basis_bwd(
+    const int batch_size,
+    const int in_features,
+    const int grid_size,
+    const int support_width,
+    const float* __restrict__ input,
+    const float* __restrict__ grid,
+    const float* __restrict__ output_grad,
+    float* __restrict__ input_grad)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * in_features;
+    if (tid >= total) return;
+
+    const int b = tid / in_features;
+    const int j = tid % in_features;
+    const int num_basis = grid_size + support_width;
+
+    const float* s_grid = grid;
+    const float* e_grid = grid + num_basis;
+
+    const float x = input[b * in_features + j];
+    const int grad_offset = b * in_features * num_basis + j * num_basis;
+
+    float grad_acc = 0.0f;
+    for (int i = 0; i < num_basis; i++) {
+        float s = s_grid[i];
+        float e = e_grid[i];
+        if (x <= s || x >= e) continue;
+
+        float u = e - x;
+        float v = x - s;
+        float width = e - s;
+        float w2 = width * width;
+        float norm = 16.0f / (w2 * w2);
+
+        float deriv = 2.0f * norm * u * v * (u - v);
+        grad_acc += output_grad[grad_offset + i] * deriv;
+    }
+
+    atomicAdd(&input_grad[b * in_features + j], grad_acc);
+}

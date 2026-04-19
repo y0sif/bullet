@@ -8,7 +8,7 @@ pub use buffer::CudaBuffer;
 use std::sync::{Arc, Mutex};
 
 use acyclib::{
-    device::{Device, DeviceBuffer, OperationError, OperationResult, operation::{CoreDeviceOps, BSplineOps}},
+    device::{Device, DeviceBuffer, OperationError, OperationResult, operation::{CoreDeviceOps, BSplineOps, ReluKanOps}},
     graph::ir::BackendMarker,
 };
 use cudarc::{
@@ -406,6 +406,80 @@ impl BSplineOps for CudaDevice {
                 .arg(&(in_features as i32))
                 .arg(&(grid_size as i32))
                 .arg(&(spline_order as i32))
+                .arg(&input.buf)
+                .arg(&grid.buf)
+                .arg(&output_grad.buf)
+                .arg(&mut input_grad.buf)
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl ReluKanOps for CudaDevice {
+    fn relu_kan_basis_fwd(
+        batch_size: usize,
+        in_features: usize,
+        grid_size: usize,
+        support_width: usize,
+        input: &Self::BufferF32,
+        grid: &Self::BufferF32,
+        output: &mut Self::BufferF32,
+    ) -> OperationResult<Self::DeviceError> {
+        let total = batch_size * in_features;
+        let func = input.device.module.load_function("relu_kan_basis_fwd").map_err(CudaError::Driver)?;
+
+        let threads = 256u32;
+        let blocks = (total as u32).div_ceil(threads);
+        let cfg = LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+
+        unsafe {
+            input
+                .device
+                .stream
+                .launch_builder(&func)
+                .arg(&(batch_size as i32))
+                .arg(&(in_features as i32))
+                .arg(&(grid_size as i32))
+                .arg(&(support_width as i32))
+                .arg(&input.buf)
+                .arg(&grid.buf)
+                .arg(&mut output.buf)
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
+        }
+
+        Ok(())
+    }
+
+    fn relu_kan_basis_bwd(
+        batch_size: usize,
+        in_features: usize,
+        grid_size: usize,
+        support_width: usize,
+        input: &Self::BufferF32,
+        grid: &Self::BufferF32,
+        output_grad: &Self::BufferF32,
+        input_grad: &mut Self::BufferF32,
+    ) -> OperationResult<Self::DeviceError> {
+        let total = batch_size * in_features;
+        let func = input.device.module.load_function("relu_kan_basis_bwd").map_err(CudaError::Driver)?;
+
+        let threads = 256u32;
+        let blocks = (total as u32).div_ceil(threads);
+        let cfg = LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+
+        unsafe {
+            input
+                .device
+                .stream
+                .launch_builder(&func)
+                .arg(&(batch_size as i32))
+                .arg(&(in_features as i32))
+                .arg(&(grid_size as i32))
+                .arg(&(support_width as i32))
                 .arg(&input.buf)
                 .arg(&grid.buf)
                 .arg(&output_grad.buf)

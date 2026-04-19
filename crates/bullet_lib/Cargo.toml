@@ -73,3 +73,23 @@ path = "../../examples/kan_simple.rs"
 [[example]]
 name = "kan_baseline"
 path = "../../examples/kan_baseline.rs"
+
+[[example]]
+name = "kan_variant_a"
+path = "../../examples/kan_variant_a.rs"
+
+[[example]]
+name = "kan_variant_b"
+path = "../../examples/kan_variant_b.rs"
+
+[[example]]
+name = "kan_variant_c"
+path = "../../examples/kan_variant_c.rs"
+
+[[example]]
+name = "kan_variant_d"
+path = "../../examples/kan_variant_d.rs"
+
+[[example]]
+name = "kan_variant_e"
+path = "../../examples/kan_variant_e.rs"

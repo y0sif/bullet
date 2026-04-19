@@ -301,3 +301,23 @@ where
         })
     }
 }
+
+impl<B: BackendMarker> GraphBuilderNode<'_, B>
+where
+    crate::graph::ir::operation::relu_kan::ReluKanBasis: GraphIROperationCompilable<B>,
+{
+    /// Evaluate ReLU-KAN basis functions for each input feature (arXiv 2406.02075).
+    ///
+    /// Input shape: (in_features, 1) batched.
+    /// Grid: constant node of shape (2 * (grid_size + support_width), 1), containing
+    /// the support-start values followed by the support-end values.
+    /// Output shape: (in_features * (grid_size + support_width), 1) batched.
+    pub fn relu_kan_basis(self, grid: Self, grid_size: usize, support_width: usize) -> Self {
+        self.builder.apply(crate::graph::ir::operation::relu_kan::ReluKanBasis {
+            input: self.node,
+            grid: grid.node,
+            grid_size,
+            support_width,
+        })
+    }
+}

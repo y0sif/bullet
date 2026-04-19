@@ -169,8 +169,12 @@ where
 
         #[cfg(feature = "cuda")]
         builder.add_custom_pass(bullet_cuda_backend::ops::FuseSparseAffineActivateWithMatmul);
-        #[cfg(feature = "cuda")]
-        builder.add_custom_pass(bullet_cuda_backend::ops::FuseKanLayer);
+        // FuseKanLayer disabled during Phase A variant sweep: the pattern-matcher
+        // hardcodes SiLU base + BSplineBasis, so variants with different base
+        // activations or a different basis (ReLU-KAN) would not match anyway.
+        // Re-enable once Phase A/B identifies a winner.
+        // #[cfg(feature = "cuda")]
+        // builder.add_custom_pass(bullet_cuda_backend::ops::FuseKanLayer);
 
         if self.print_ir {
             builder.dump_ir_on_build();
