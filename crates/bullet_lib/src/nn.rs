@@ -1,6 +1,7 @@
 pub mod kan;
 pub mod kan_lut;
 pub mod relu_kan;
+pub mod relu_kan_lut;
 
 pub use acyclib::{
     device::tensor::Shape,

@@ -93,3 +93,23 @@ path = "../../examples/kan_variant_d.rs"
 [[example]]
 name = "kan_variant_e"
 path = "../../examples/kan_variant_e.rs"
+
+[[example]]
+name = "kan_variant_b_g3"
+path = "../../examples/kan_variant_b_g3.rs"
+
+[[example]]
+name = "kan_variant_b_g7"
+path = "../../examples/kan_variant_b_g7.rs"
+
+[[example]]
+name = "kan_variant_b_g10"
+path = "../../examples/kan_variant_b_g10.rs"
+
+[[example]]
+name = "kan_variant_b_o2"
+path = "../../examples/kan_variant_b_o2.rs"
+
+[[example]]
+name = "kan_variant_b_o4"
+path = "../../examples/kan_variant_b_o4.rs"
