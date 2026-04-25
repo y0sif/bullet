@@ -13,7 +13,7 @@ use bullet_lib::{
         },
         inputs,
     },
-    nn::{optimiser, relu_kan::relu_kan_layer},
+    nn::{optimiser, relu_kan::relu_kan_layer, relu_kan_lut::relu_kan_lut_save_format},
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -28,6 +28,8 @@ const GRID_SIZE: usize = 5;
 const SUPPORT_WIDTH: usize = 3; // `k` in the ReLU-KAN paper
 const SCALE: i32 = 400;
 const QA: i16 = 255;
+const Q_KAN: i16 = 64;
+const NUM_LUT_SAMPLES: usize = 64;
 
 fn main() {
     let mut trainer = ValueTrainerBuilder::default()
@@ -37,6 +39,28 @@ fn main() {
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(QA),
             SavedFormat::id("l0b").round().quantise::<i16>(QA),
+            relu_kan_lut_save_format(
+                "kan1",
+                2 * FT_SIZE,
+                KAN_HIDDEN,
+                GRID_SIZE,
+                SUPPORT_WIDTH,
+                (0.0, 1.0),
+                (0.0, 1.0),
+                NUM_LUT_SAMPLES,
+                Q_KAN,
+            ),
+            relu_kan_lut_save_format(
+                "kan2",
+                KAN_HIDDEN,
+                1,
+                GRID_SIZE,
+                SUPPORT_WIDTH,
+                (-1.0, 1.0),
+                (-1.0, 1.0),
+                NUM_LUT_SAMPLES,
+                Q_KAN,
+            ),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
