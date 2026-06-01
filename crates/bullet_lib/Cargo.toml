@@ -117,3 +117,7 @@ path = "../../examples/kan_variant_b_o4.rs"
 [[example]]
 name = "phase_e0_smoke"
 path = "../../examples/phase_e0_smoke.rs"
+
+[[example]]
+name = "phase_e1_h5"
+path = "../../examples/phase_e1_h5.rs"
