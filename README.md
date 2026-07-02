@@ -1,3 +1,21 @@
+## Research fork
+
+This is a research fork of [jw1912/bullet](https://github.com/jw1912/bullet) by Jamie Whiting. It adds first-class trainable-activation (KAN) support to the trainer:
+
+- a **B-spline basis** operation and a **ReLU-KAN basis** operation as IR nodes, with custom CUDA kernels;
+- a pattern-matching **fusion pass** (1.71x training speedup);
+- **int8 lookup-table export** (`[in][sample][out]` layout, 64 samples/edge, linear interpolation) for engine-side inference.
+
+Training notebooks for the experiment phases are under [`notebooks/`](notebooks/).
+
+Companion repos: [y0sif/kanue](https://github.com/y0sif/kanue) (offline prototype) and [y0sif/akimbo](https://github.com/y0sif/akimbo) (engine integration + SPRT validation).
+
+Paper: *Trainable Activation Functions for Real-Time Chess Engine Evaluation* (preprint forthcoming on arXiv).
+
+The original upstream README follows below.
+
+---
+
 <div align="center">
 
 # bullet
